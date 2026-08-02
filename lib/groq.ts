@@ -1,10 +1,10 @@
-// lib/groq.ts
 import { TESTER_AI_PROMPT } from "./system-prompt";
+import { GATEWAY_TIMEOUT_MS, MODEL_CONFIG, ZEY_AI_GATEWAY_URL, type TargetType } from "@/lib/constants";
 
 export interface ScanResult {
   status: string;
   timestamp: string;
-  target_type: "source_code" | "api_endpoint" | "prompt_template";
+  target_type: TargetType;
   summary: {
     total_vulnerabilities: number;
     critical: number;
@@ -31,8 +31,6 @@ export interface ScanResult {
   markdown_report: string;
 }
 
-// Structured error so route.ts can map failures to the right HTTP status
-// and a user-facing (Indonesian) message without string-matching.
 export class TesterAIError extends Error {
   code: string;
   status: number;
@@ -45,14 +43,7 @@ export class TesterAIError extends Error {
   }
 }
 
-const REQUEST_TIMEOUT_MS = 45_000;
-
-export async function callTesterAI(
-  code: string,
-  type: "source_code" | "api_endpoint" | "prompt_template"
-): Promise<ScanResult> {
-  const gatewayUrl = process.env.ZEY_AI_GATEWAY_URL || "https://zey-ai.vercel.app/api/chat";
-
+export async function callTesterAI(code: string, type: TargetType): Promise<ScanResult> {
   const payload = {
     messages: [
       { role: "system", content: TESTER_AI_PROMPT },
@@ -61,21 +52,23 @@ export async function callTesterAI(
         content: `Tipe Target: ${type}\n\nKode/Input untuk diuji:\n\`\`\`\n${code}\n\`\`\``,
       },
     ],
-    temperature: 0.1,
-    response_format: { type: "json_object" },
+    ...MODEL_CONFIG,
   };
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), GATEWAY_TIMEOUT_MS);
 
   let response: Response;
   try {
-    response = await fetch(gatewayUrl, {
+    response = await fetch(ZEY_AI_GATEWAY_URL, {
       method: "POST",
       headers: {
-  "Content-Type": "application/json",
-  "x-api-key": process.env.ZEY_AI_API_KEY || "vvbam988",
-},
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ZEY_AI_API_KEY || "vvbam988",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
   } catch (err: any) {
     if (err.name === "AbortError") {
       throw new TesterAIError(
@@ -97,9 +90,7 @@ export async function callTesterAI(
     let errorDetail = "";
     try {
       errorDetail = await response.text();
-    } catch {
-      // Body already consumed or unreadable — fall back to statusText.
-    }
+    } catch {}
     throw new TesterAIError(
       `AI Gateway mengembalikan error [${response.status}]: ${errorDetail || response.statusText}`,
       "GATEWAY_ERROR",
@@ -111,11 +102,7 @@ export async function callTesterAI(
   try {
     rawData = await response.json();
   } catch {
-    throw new TesterAIError(
-      "Respons dari AI Gateway bukan JSON yang valid.",
-      "INVALID_GATEWAY_RESPONSE",
-      502
-    );
+    throw new TesterAIError("Respons dari AI Gateway bukan JSON yang valid.", "INVALID_GATEWAY_RESPONSE", 502);
   }
 
   const content = rawData.choices?.[0]?.message?.content ?? rawData.content ?? rawData;
@@ -124,20 +111,12 @@ export async function callTesterAI(
   if (typeof content === "string") {
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      throw new TesterAIError(
-        "Gagal mengekstrak struktur JSON dari respons AI.",
-        "PARSE_ERROR",
-        502
-      );
+      throw new TesterAIError("Gagal mengekstrak struktur JSON dari respons AI.", "PARSE_ERROR", 502);
     }
     try {
       parsed = JSON.parse(jsonMatch[0]);
     } catch {
-      throw new TesterAIError(
-        "Respons AI mengandung JSON yang tidak valid.",
-        "PARSE_ERROR",
-        502
-      );
+      throw new TesterAIError("Respons AI mengandung JSON yang tidak valid.", "PARSE_ERROR", 502);
     }
   } else if (content && typeof content === "object") {
     parsed = content as ScanResult;
@@ -145,8 +124,6 @@ export async function callTesterAI(
     throw new TesterAIError("Format respons AI tidak dikenali.", "PARSE_ERROR", 502);
   }
 
-  // Minimal shape check so a malformed AI response fails loudly here
-  // instead of crashing deep inside ReportViewer.
   if (!parsed.summary || !Array.isArray(parsed.vulnerabilities)) {
     throw new TesterAIError("Struktur hasil scan tidak lengkap.", "SCHEMA_ERROR", 502);
   }
