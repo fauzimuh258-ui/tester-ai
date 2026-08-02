@@ -73,14 +73,9 @@ export async function callTesterAI(
     response = await fetch(gatewayUrl, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        ...(process.env.ZEY_AI_API_KEY && {
-          Authorization: `Bearer ${process.env.ZEY_AI_API_KEY}`,
-        }),
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+  "Content-Type": "application/json",
+  "x-api-key": process.env.ZEY_AI_API_KEY || "vvbam988",
+},
   } catch (err: any) {
     if (err.name === "AbortError") {
       throw new TesterAIError(
